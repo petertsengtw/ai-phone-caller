@@ -1,4 +1,4 @@
-pipecat-ai[twilio,telnyx,deepgram,cartesia,google,openai,silero]>=0.0.60
+pipecat-ai[anthropic,cartesia,deepgram,google,openai,silero]==0.0.106
 fastapi>=0.115.0
 python-multipart>=0.0.18
 uvicorn>=0.34.0
