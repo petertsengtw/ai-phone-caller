@@ -24,6 +24,8 @@ from pydantic import BaseModel
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.voice_response import Connect, Stream, VoiceResponse
 
+from languages import LANGUAGES, resolve_language
+
 load_dotenv(override=True)
 
 
@@ -37,6 +39,7 @@ class CallRequest(BaseModel):
     task: str = ""  # What the AI should do on this call
     caller_name: str = ""  # Who the AI represents
     greeting: str = ""  # Optional first thing to say
+    language: str = ""  # de, en, or zh-TW (defaults to CALLER_LANGUAGE)
 
 
 class CallResponse(BaseModel):
@@ -119,6 +122,11 @@ async def initiate_call(req: CallRequest):
     """
     logger.info(f"Outbound call request: {req.to}")
 
+    try:
+        language = resolve_language(req.language)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
     from_number = os.getenv("TWILIO_PHONE_NUMBER")
     if not from_number:
         raise HTTPException(500, "TWILIO_PHONE_NUMBER not configured")
@@ -145,6 +153,7 @@ async def initiate_call(req: CallRequest):
             "task": req.task,
             "caller_name": req.caller_name,
             "greeting": req.greeting,
+            "language": language,
             "to": req.to,
         }
 
@@ -183,6 +192,8 @@ async def serve_twiml(request: Request):
         stream.parameter(name="task", value=config["task"])
     if config.get("caller_name"):
         stream.parameter(name="caller_name", value=config["caller_name"])
+    if config.get("language"):
+        stream.parameter(name="language", value=config["language"])
 
     connect.append(stream)
     response.append(connect)
@@ -203,10 +214,12 @@ async def serve_inbound_twiml(request: Request):
 
     ws_url = get_ws_url()
 
-    # Store config for inbound call - bot will be Botty, Arthurs KI-Assistent
+    # Store config for inbound call - bot will be Botty, an AI assistant
+    language = resolve_language()
     _call_configs[call_sid] = {
-        "task": "Jemand ruft dich an. Du bist Botty, ein KI-Assistent. Der Besitzer hat mich selbst gebaut mit OpenClaw. Du kannst Telefonanrufe fuehren, Termine machen und als persoenliche Assistenz arbeiten. Sei freundlich und gespraechig. Frag wer anruft und wie du helfen kannst. Wenn jemand nach dem Besitzer fragt, sag dass du sein KI-Assistent bist und gerne eine Nachricht weitergeben kannst.",
+        "task": LANGUAGES[language]["inbound_task"],
         "caller_name": "Botty",
+        "language": language,
     }
 
     response = VoiceResponse()
@@ -218,6 +231,7 @@ async def serve_inbound_twiml(request: Request):
     stream.parameter(name="call_sid", value=call_sid)
     stream.parameter(name="task", value=_call_configs[call_sid]["task"])
     stream.parameter(name="caller_name", value="Botty")
+    stream.parameter(name="language", value=language)
 
     connect.append(stream)
     response.append(connect)

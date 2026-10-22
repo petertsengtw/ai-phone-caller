@@ -2,7 +2,7 @@
 
 > Open-source AI agent that makes real phone calls. Built on [Pipecat](https://pipecat.ai) + [OpenClaw](https://openclaw.ai).
 
-Your AI assistant calls a real phone number, has a natural conversation in German or English, and completes a task — like scheduling an appointment, following up on an order, or making an inquiry.
+Your AI assistant calls a real phone number, has a natural conversation in Taiwanese Mandarin, English, or German, and completes a task — like scheduling an appointment, following up on an order, or making an inquiry.
 
 ## How it works
 
@@ -100,7 +100,8 @@ Start an outbound call.
   "to": "+4930123456",     // Required: E.164 phone number
   "task": "Schedule...",    // Required: what to accomplish
   "caller_name": "Name",   // Optional: who the AI represents
-  "greeting": "Guten Tag"  // Optional: custom opening
+  "greeting": "Guten Tag", // Optional: custom opening
+  "language": "zh-TW"      // Optional: zh-TW, en, or de (defaults to CALLER_LANGUAGE)
 }
 ```
 

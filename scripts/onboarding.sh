@@ -27,10 +27,12 @@ echo -e "${BLUE}Step 1/6: Language${NC}"
 echo "Which language should your phone agent speak?"
 echo "  1) German (Deutsch)"
 echo "  2) English"
+echo "  3) Taiwanese Mandarin (中文-台灣)"
 echo ""
-read -p "Choose [1/2] (default: 1): " LANG_CHOICE
+read -p "Choose [1/2/3] (default: 1): " LANG_CHOICE
 case "$LANG_CHOICE" in
   2) CALLER_LANGUAGE="en"; LANG_NAME="English" ;;
+  3) CALLER_LANGUAGE="zh-TW"; LANG_NAME="Taiwanese Mandarin" ;;
   *) CALLER_LANGUAGE="de"; LANG_NAME="German" ;;
 esac
 echo -e "${GREEN}✓ Language: ${LANG_NAME}${NC}"

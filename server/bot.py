@@ -35,6 +35,8 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketTransport,
 )
 
+from languages import LANGUAGES, cartesia_voice_id, resolve_language
+
 load_dotenv(override=True)
 
 logger.remove(0)
@@ -44,15 +46,14 @@ logger.add(sys.stderr, level="DEBUG")
 # --------------- Provider Factories --------------- #
 
 
-def create_stt():
+def create_stt(language: str):
     """Create Speech-to-Text service (Deepgram)."""
     from pipecat.services.deepgram.stt import DeepgramSTTService
 
-    lang = os.getenv("CALLER_LANGUAGE", "de")
     return DeepgramSTTService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
         settings=DeepgramSTTService.Settings(
-            language=lang,
+            language=LANGUAGES[language]["stt_language"],
             model="nova-3",
             smart_format=True,
             interim_results=True,
@@ -62,22 +63,18 @@ def create_stt():
     )
 
 
-def create_tts():
+def create_tts(language: str):
     """Create Text-to-Speech service based on TTS_PROVIDER env."""
     provider = os.getenv("TTS_PROVIDER", "cartesia").lower()
 
     if provider == "cartesia":
         from pipecat.services.cartesia.tts import CartesiaTTSService, GenerationConfig
 
-        voice_id = os.getenv(
-            "CARTESIA_VOICE_ID",
-            "afa425cf-5489-4a09-8a3f-d3cb1f82150d",  # Nico - Friendly Agent (native German)
-        )
         return CartesiaTTSService(
             api_key=os.getenv("CARTESIA_API_KEY"),
-            voice_id=voice_id,
             settings=CartesiaTTSService.Settings(
-                language="de",
+                voice=cartesia_voice_id(language),
+                language=LANGUAGES[language]["tts_language"],
                 generation_config=GenerationConfig(
                     speed=1.1,
                     emotion="calm",
@@ -132,49 +129,25 @@ def create_llm():
 # --------------- Bot Pipeline --------------- #
 
 
-DEFAULT_SYSTEM_PROMPT = """Du bist ein freundlicher deutschsprachiger Assistent, der im Auftrag seines Arbeitgebers telefoniert.
-
-SPRECHSTIL:
-- Sprich wie ein normaler Mensch am Telefon. Locker, freundlich, natuerlich.
-- Verwende Umgangssprache und Kurzformen: "Ich ruf an wegen...", "Klar, mach ich", "Genau", "Alles klar".
-- KEINE Fuellwoerter wie "Aehmm", "Aeh", "Also" am Satzanfang. Die klingen kuenstlich vorgelesen.
-- Saetze kurz halten. Maximal 1-2 Saetze pro Antwort. Wie ein echtes Telefonat.
-- KEINE englischen Woerter. Rein Deutsch.
-- KEINE Schriftsprache. Kein "Koennten Sie mir mitteilen" sondern "Koennten Sie mir sagen".
-- KEINE Markdown, Sonderzeichen, Aufzaehlungen. Dein Output wird laut vorgelesen.
-- Duze niemanden ausser du wirst geduzt.
-
-VERHALTEN:
-- Sei hoeflich aber nicht steif. Professionell aber menschlich.
-- Wenn jemand fragt wer du bist: Du rufst im Auftrag von [CALLER_NAME] an.
-- Wenn die Aufgabe erledigt ist, bedanke dich kurz und sag "Schoenen Tag noch, tschuess!"
-- Bei Anrufbeantworter: Kurze Nachricht hinterlassen und auflegen.
-- Nur Fragen beantworten die mit deiner Aufgabe zu tun haben.
-
-WICHTIG ZUM GESPRAECHSFLUSS:
-- Sei gespraechig und offen. Rede gerne und viel am Anfang, damit die andere Person merkt dass jemand dran ist.
-- Wenn du unterbrochen wirst, warte kurz und fahr dann fort.
-- Wenn dein erster Satz unterbrochen wird, fang nochmal von vorn an mit der Vorstellung.
-- Nach deiner Vorstellung, warte auf eine Antwort bevor du weiterredest.
-"""
-
-
 async def run_bot(transport: BaseTransport, handle_sigint: bool, call_config: dict = None):
     """Run the voice pipeline with configured providers."""
     config = call_config or {}
+    language = resolve_language(config.get("language"))
+    lang = LANGUAGES[language]
+    logger.info(f"Call language: {language}")
 
     # Build system prompt from task description
-    system_prompt = config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+    system_prompt = config.get("system_prompt", lang["system_prompt"])
     task_desc = config.get("task", "")
     caller_name = config.get("caller_name", "")
 
     full_prompt = system_prompt.replace("[CALLER_NAME]", caller_name)
     if task_desc:
-        full_prompt += f"\n\nDEINE AUFGABE FUER DIESEN ANRUF:\n{task_desc}"
+        full_prompt += f"\n\n{lang['task_header']}\n{task_desc}"
 
     llm = create_llm()
-    stt = create_stt()
-    tts = create_tts()
+    stt = create_stt(language)
+    tts = create_tts(language)
 
     # Use OpenAILLMContext (works with all LLM providers in Pipecat)
     messages = [
@@ -211,7 +184,7 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, call_config: di
         # Speak immediately - don't wait, the caller expects someone to talk
         messages.append({
             "role": "system",
-            "content": "Der Anruf wurde gerade verbunden. Sag SOFORT Hallo und stell dich vor. Sei gespraechig und offen. Warte nicht auf die andere Person, fang direkt an zu reden.",
+            "content": lang["on_connect"],
         })
         await task.queue_frame(LLMRunFrame())
 
@@ -239,6 +212,7 @@ async def bot(runner_args: RunnerArguments, call_config: dict = None):
         call_config = {
             "task": body_data.get("task", ""),
             "caller_name": body_data.get("caller_name", ""),
+            "language": body_data.get("language", ""),
         }
 
     serializer = TwilioFrameSerializer(
