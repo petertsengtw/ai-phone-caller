@@ -94,6 +94,7 @@ TAIWANESE_MANDARIN_SYSTEM_PROMPT = """你是一位親切的助理，正在代表
 
 LANGUAGES = {
     "de": {
+        "language_name": "German",
         "stt_language": "de",
         "tts_language": "de",
         "default_voice_id": "afa425cf-5489-4a09-8a3f-d3cb1f82150d",  # Nico - Friendly Agent (native German)
@@ -103,6 +104,7 @@ LANGUAGES = {
         "inbound_task": "Jemand ruft dich an. Du bist Botty, ein KI-Assistent. Du kannst Telefonanrufe fuehren, Termine machen und als persoenliche Assistenz arbeiten. Sei freundlich und gespraechig. Frag wer anruft und wie du helfen kannst. Wenn jemand nach dem Besitzer fragt, sag dass du sein KI-Assistent bist und gerne eine Nachricht weitergeben kannst.",
     },
     "en": {
+        "language_name": "English",
         "stt_language": "en-US",
         "tts_language": "en",
         "default_voice_id": "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4",  # Skylar - friendly support guide (American)
@@ -112,6 +114,7 @@ LANGUAGES = {
         "inbound_task": "Someone is calling you. You are Botty, an AI assistant. You can make phone calls, schedule appointments, and work as a personal assistant. Be friendly and talkative. Ask who is calling and how you can help. If someone asks for the owner, say you are their AI assistant and are happy to pass on a message.",
     },
     "zh-TW": {
+        "language_name": "Taiwanese Mandarin (Traditional Chinese)",
         "stt_language": "zh-TW",
         "tts_language": "zh",
         "default_voice_id": "453c418c-125e-4e5a-b048-03fec55d0963",  # Feng - support voice (Taiwanese Mandarin)

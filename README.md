@@ -14,6 +14,7 @@
 - [安裝與啟動](#安裝與啟動)
 - [打一通電話](#打一通電話)
 - [語言與聲音](#語言與聲音)
+- [分機與語音選單](#分機與語音選單)
 - [接聽來電](#接聽來電)
 - [設定一覽](#設定一覽)
 - [API 說明](#api-說明)
@@ -94,10 +95,13 @@ sequenceDiagram
     S-->>T: TwiML：連到 /ws，附上任務與語言
     T->>S: 開啟 WebSocket /ws
     S->>B: 啟動語音管線
-    B->>AI: 電話已接通，請打招呼並自我介紹
-    AI-->>B: 開場白語音
+    P->>T: 「喂？」
+    T->>B: 聲音串流
+    B->>AI: 判斷是真人還是語音選單
+    Note over B,AI: 遇到語音選單時，先按鍵導航，直到真人接聽
+    AI-->>B: 是真人，產生開場白語音
     B->>T: 播放開場白
-    T->>P: 對方聽到 AI 說話
+    T->>P: 對方聽到 AI 自我介紹
 
     loop 對話進行中
         P->>T: 對方說話
@@ -245,13 +249,53 @@ server 的 terminal 會即時顯示通話狀態和對話內容。
 - 想換聲音，到 [Cartesia 聲音庫](https://play.cartesia.ai/voices) 挑一個，把聲音 ID 填進對應的設定。
 - 各語言的 prompt（說話風格、禮貌用語等）在 [`server/languages.py`](server/languages.py)，可以直接修改。
 
+## 分機與語音選單
+
+電話接通後遇到總機或語音選單，有兩種處理方式，可以同時使用。
+
+### 方式一：事先指定分機（`extension`）
+
+已經知道要按什麼時，用 `extension` 指定。Twilio 會在電話接通後直接送出按鍵訊號，最穩定。
+
+```bash
+curl -X POST http://localhost:7860/call \
+  -H "Content-Type: application/json" \
+  -d '{"to": "+886223456789", "extension": "wwww123", "task": "詢問報價進度"}'
+```
+
+- 可用的字元：`0-9`、`*`、`#`，以及 `w`（等 0.5 秒）
+- 在號碼前面加幾個 `w`，可以等總機的語音播一下再按，例如 `wwww123` 是等 2 秒再按 `123`
+
+### 方式二：AI 自動聽選單（`ivr`，預設開啟）
+
+AI 會先聽對方說什麼，判斷是語音選單還是真人：
+
+```mermaid
+flowchart TD
+    A["電話接通，AI 先聽"] --> B{"對方是？"}
+    B -->|"真人（例如「喂？」）"| C["對話模式<br/>AI 自我介紹，開始執行任務"]
+    B -->|"語音選單（例如「預約請按 2」）"| D["選單模式<br/>AI 依任務選擇並按鍵"]
+    B -->|"5 秒都沒聲音"| C
+    D -->|"轉接中／請稍候"| E["等待真人接聽"]
+    E --> B
+    D -->|"有真人開始說話"| C
+    D -->|"卡住（例如要輸入帳號）"| F["掛斷電話"]
+```
+
+- AI 會根據 `task` 判斷該按哪個鍵，所以任務要寫清楚，例如「預約剪髮」，AI 才知道要選「預約」
+- 選單要求「用說的」回答時，AI 會用該通電話的語言回答
+- 這種方式送出的是**按鍵音**（從通話聲音裡播放），大多數總機都能辨識，但少數系統可能收不到。已知分機時建議用方式一
+- 開啟時 AI 會**先聽再說**，真人接聽後 AI 要等對方先開口（或等 5 秒）才會說話。如果確定對方是真人、希望 AI 一接通就開口，可以設 `"ivr": false`
+
+兩種方式可以一起用：先用 `extension` 按分機，接下來如果還有選單，AI 再自己處理。
+
 ## 接聽來電
 
 AI 也可以接聽打到你 Twilio 號碼的電話：
 
 1. 到 Twilio 主控台的號碼設定：https://console.twilio.com/us1/develop/phone-numbers/manage/incoming
 2. 點你的號碼，在「A call comes in」選 **Webhook**，填入 `https://<你的 ngrok 網址>/inbound-twiml`（HTTP POST）
-3. 來電時 AI 會以「Botty」的身分接聽，使用 `CALLER_LANGUAGE` 的語言
+3. 來電時 AI 會以「Botty」的身分接聽，使用 `CALLER_LANGUAGE` 的語言，一接起來就主動打招呼（不啟用語音選單導航）
 
 ## 設定一覽
 
@@ -297,6 +341,8 @@ AI 也可以接聽打到你 Twilio 號碼的電話：
 | `task` | | 這通電話要完成的任務 |
 | `caller_name` | | AI 代表誰打電話 |
 | `language` | | `zh-TW`、`en` 或 `de`，預設為 `CALLER_LANGUAGE` |
+| `extension` | | 接通後要按的鍵，例如 `wwww123`（見[分機與語音選單](#分機與語音選單)） |
+| `ivr` | | 是否讓 AI 自動聽語音選單，預設 `true` |
 
 回應：
 
@@ -308,7 +354,7 @@ AI 也可以接聽打到你 Twilio 號碼的電話：
 }
 ```
 
-`language` 不支援時回傳 `400`。
+`language` 不支援或 `extension` 含有不合法的字元時，回傳 `400`。
 
 ### `GET /health`
 
@@ -348,7 +394,7 @@ AI 也可以接聽打到你 Twilio 號碼的電話：
 - **Python 版本**：請用 3.12。`requirements.txt` 已固定 `pipecat-ai==0.0.106`，程式依這個版本的 API 撰寫，升級可能需要改程式。
 - **`scripts/start.sh` 在 macOS 無法使用**（使用了 Linux 版 `sed` 的語法），請照上面的步驟手動開 ngrok 和 server。
 - **Google Gemini**：目前和 Pipecat 的訊息格式有相容性問題，建議使用 OpenAI 或 Anthropic。
-- **回應延遲**：AI 會等對方停頓約 1 秒才回話，避免插嘴。可在 `bot.py` 的 `VADParams` 調整 `stop_secs`。
+- **回應延遲**：AI 會等對方停頓約 1 秒才回話，避免插嘴；在語音選單模式會等 2 秒，避免選單還沒念完就按鍵。可在 `bot.py` 的 `CONVERSATION_VAD_PARAMS` 和 `IVR_VAD_PARAMS` 調整 `stop_secs`。
 
 ## OpenClaw 整合
 

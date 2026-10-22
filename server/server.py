@@ -12,6 +12,7 @@ from the telephony provider (Twilio/Telnyx).
 """
 
 import os
+import re
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -40,6 +41,8 @@ class CallRequest(BaseModel):
     caller_name: str = ""  # Who the AI represents
     greeting: str = ""  # Optional first thing to say
     language: str = ""  # de, en, or zh-TW (defaults to CALLER_LANGUAGE)
+    extension: str = ""  # Keys to press after pickup, e.g. "ww123#" (each w = wait 0.5s)
+    ivr: bool = True  # Listen first and let the AI navigate phone menus
 
 
 class CallResponse(BaseModel):
@@ -127,6 +130,9 @@ async def initiate_call(req: CallRequest):
     except ValueError as e:
         raise HTTPException(400, str(e))
 
+    if not re.fullmatch(r"[0-9*#wW]*", req.extension):
+        raise HTTPException(400, "extension may only contain 0-9, *, #, and w/W (wait)")
+
     from_number = os.getenv("TWILIO_PHONE_NUMBER")
     if not from_number:
         raise HTTPException(500, "TWILIO_PHONE_NUMBER not configured")
@@ -137,6 +143,11 @@ async def initiate_call(req: CallRequest):
 
     twiml_url = f"{server_url}/twiml"
 
+    call_options = {}
+    if req.extension:
+        # Twilio presses these keys right after the call is answered
+        call_options["send_digits"] = req.extension
+
     try:
         client = get_twilio_client()
         call = client.calls.create(
@@ -146,6 +157,7 @@ async def initiate_call(req: CallRequest):
             method="POST",
             status_callback=f"{server_url}/call-status",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
+            **call_options,
         )
 
         # Store call config for when WebSocket connects
@@ -154,6 +166,7 @@ async def initiate_call(req: CallRequest):
             "caller_name": req.caller_name,
             "greeting": req.greeting,
             "language": language,
+            "ivr": req.ivr,
             "to": req.to,
         }
 
@@ -194,6 +207,7 @@ async def serve_twiml(request: Request):
         stream.parameter(name="caller_name", value=config["caller_name"])
     if config.get("language"):
         stream.parameter(name="language", value=config["language"])
+    stream.parameter(name="ivr", value="1" if config.get("ivr", True) else "0")
 
     connect.append(stream)
     response.append(connect)
@@ -232,6 +246,7 @@ async def serve_inbound_twiml(request: Request):
     stream.parameter(name="task", value=_call_configs[call_sid]["task"])
     stream.parameter(name="caller_name", value="Botty")
     stream.parameter(name="language", value=language)
+    stream.parameter(name="ivr", value="0")  # Inbound: a human called us, greet right away
 
     connect.append(stream)
     response.append(connect)

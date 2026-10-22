@@ -21,11 +21,20 @@ from dotenv import load_dotenv
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.extensions.ivr.ivr_navigator import IVRNavigator, IVRStatus
+from pipecat.frames.frames import (
+    EndFrame,
+    LLMMessagesUpdateFrame,
+    LLMRunFrame,
+    UserStartedSpeakingFrame,
+    VADParamsUpdateFrame,
+    VADUserStartedSpeakingFrame,
+)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import parse_telephony_websocket
 from pipecat.serializers.twilio import TwilioFrameSerializer
@@ -129,6 +138,41 @@ def create_llm():
 # --------------- Bot Pipeline --------------- #
 
 
+# VAD for normal conversation
+CONVERSATION_VAD_PARAMS = VADParams(
+    confidence=0.8,    # Hoehere Confidence noetig (war 0.7)
+    start_secs=0.4,    # 0.4s bevor "User spricht" erkannt (war 0.3)
+    stop_secs=1.0,     # 1.0s Stille bevor Bot antwortet (war 0.8)
+    min_volume=0.6,    # Hoehere Mindestlautstaerke (filtert Hintergrund)
+)
+
+# VAD while navigating a phone menu: wait longer so menus aren't cut off mid-list
+IVR_VAD_PARAMS = VADParams(
+    confidence=0.8,
+    start_secs=0.4,
+    stop_secs=2.0,
+    min_volume=0.6,
+)
+
+# With IVR navigation the bot listens first; if nobody says anything
+# within this many seconds, it starts talking anyway.
+LISTEN_FIRST_TIMEOUT_SECS = 5.0
+
+
+class SpeechWatcher(FrameProcessor):
+    """Records whether the other side has started speaking at all."""
+
+    def __init__(self):
+        super().__init__()
+        self.heard_speech = False
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, (VADUserStartedSpeakingFrame, UserStartedSpeakingFrame)):
+            self.heard_speech = True
+        await self.push_frame(frame, direction)
+
+
 async def run_bot(transport: BaseTransport, handle_sigint: bool, call_config: dict = None):
     """Run the voice pipeline with configured providers."""
     config = call_config or {}
@@ -156,12 +200,29 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, call_config: di
     context = OpenAILLMContext(messages)
     context_aggregator = llm.create_context_aggregator(context)
 
+    # IVR navigation: listen first, detect phone menus and press keys (DTMF),
+    # switch to normal conversation once a human answers.
+    navigate_ivr = config.get("ivr", True)
+    speech_watcher = SpeechWatcher()
+    ivr_navigator = None
+    if navigate_ivr:
+        ivr_goal = task_desc or "Reach a live person."
+        if caller_name:
+            ivr_goal += f"\nYou are calling on behalf of {caller_name}."
+        ivr_goal += f"\nWhen a verbal response is needed, speak {lang['language_name']}."
+        ivr_goal += (
+            "\nIf a live human starts talking to you (e.g. greets you or asks how they can help),"
+            " respond with ONLY `<mode>conversation</mode>`."
+        )
+        ivr_navigator = IVRNavigator(llm=llm, ivr_prompt=ivr_goal, ivr_vad_params=IVR_VAD_PARAMS)
+
     pipeline = Pipeline(
         [
             transport.input(),
+            speech_watcher,
             stt,
             context_aggregator.user(),
-            llm,
+            ivr_navigator or llm,
             tts,
             transport.output(),
             context_aggregator.assistant(),
@@ -178,8 +239,64 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, call_config: di
         ),
     )
 
+    # "classify" (listening, not yet sure if human or menu), "ivr", or "conversation"
+    mode = "classify" if navigate_ivr else "conversation"
+    background_tasks: set[asyncio.Task] = set()
+
+    async def start_conversation(history: list[dict]):
+        """Switch to normal conversation with the task prompt."""
+        nonlocal mode
+        if mode == "conversation":
+            return
+        mode = "conversation"
+        logger.info("Human detected - switching to conversation mode")
+        new_messages = [{"role": "system", "content": full_prompt}, *history]
+        if not history:
+            new_messages.append({"role": "system", "content": lang["on_connect"]})
+        await task.queue_frames([
+            VADParamsUpdateFrame(params=CONVERSATION_VAD_PARAMS),
+            LLMMessagesUpdateFrame(messages=new_messages, run_llm=True),
+        ])
+
+    async def start_conversation_if_silent():
+        """Nobody spoke after pickup (e.g. waiting for us to talk first)."""
+        await asyncio.sleep(LISTEN_FIRST_TIMEOUT_SECS)
+        if mode == "classify" and not speech_watcher.heard_speech:
+            logger.info("No speech after pickup - speaking first")
+            await start_conversation([])
+
+    if ivr_navigator:
+
+        @ivr_navigator.event_handler("on_conversation_detected")
+        async def on_conversation_detected(processor, conversation_history):
+            await start_conversation(conversation_history)
+
+        @ivr_navigator.event_handler("on_ivr_status_changed")
+        async def on_ivr_status_changed(processor, status):
+            nonlocal mode
+            if status == IVRStatus.DETECTED:
+                mode = "ivr"
+                logger.info("Phone menu detected - navigating")
+            elif status == IVRStatus.COMPLETED:
+                # Transferred (maybe on hold): listen again until a human picks up
+                mode = "classify"
+                logger.info("Phone menu completed - waiting for a human")
+                await task.queue_frame(
+                    LLMMessagesUpdateFrame(
+                        messages=[{"role": "system", "content": IVRNavigator.CLASSIFIER_PROMPT}],
+                        run_llm=False,
+                    )
+                )
+            elif status == IVRStatus.STUCK:
+                logger.warning("Stuck in phone menu - hanging up")
+                await task.queue_frame(EndFrame())
+
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
+        if navigate_ivr:
+            logger.info("Call connected - listening first (IVR navigation on)")
+            background_tasks.add(asyncio.create_task(start_conversation_if_silent()))
+            return
         logger.info("Call connected - speaking immediately")
         # Speak immediately - don't wait, the caller expects someone to talk
         messages.append({
@@ -213,6 +330,7 @@ async def bot(runner_args: RunnerArguments, call_config: dict = None):
             "task": body_data.get("task", ""),
             "caller_name": body_data.get("caller_name", ""),
             "language": body_data.get("language", ""),
+            "ivr": body_data.get("ivr", "1") != "0",
         }
 
     serializer = TwilioFrameSerializer(
@@ -228,14 +346,7 @@ async def bot(runner_args: RunnerArguments, call_config: dict = None):
             audio_in_enabled=True,
             audio_out_enabled=True,
             add_wav_header=False,
-            vad_analyzer=SileroVADAnalyzer(
-                params=VADParams(
-                    confidence=0.8,    # Hoehere Confidence noetig (war 0.7)
-                    start_secs=0.4,    # 0.4s bevor "User spricht" erkannt (war 0.3)
-                    stop_secs=1.0,     # 1.0s Stille bevor Bot antwortet (war 0.8)
-                    min_volume=0.6,    # Hoehere Mindestlautstaerke (filtert Hintergrund)
-                ),
-            ),
+            vad_analyzer=SileroVADAnalyzer(params=CONVERSATION_VAD_PARAMS),
             serializer=serializer,
         ),
     )
